@@ -18,6 +18,7 @@ use tracing_subscriber::EnvFilter;
 use crate::models::enums::ExecutionOutcomeStatus;
 use crate::models::events::Event;
 
+// TODO: remove all db related
 fn get_database_credentials() -> String {
     dotenv().ok();
 
@@ -75,6 +76,7 @@ fn main() {
         .map(|arg| arg.as_str())
         .expect("You need to provide a command: `init` or `run` as arg");
 
+    // TODO: add reading the config from ENV
     match command {
         "init" => {
             let config_args = near_indexer::InitConfigArgs {
@@ -87,7 +89,7 @@ fn main() {
                 download_genesis: false,
                 download_genesis_url: None,
                 download_config: false,
-                download_config_url: Some("https://s3-us-west-1.amazonaws.com/build.nearprotocol.com/nearcore-deploy/mainnet/config.json".to_string()),
+                download_config_url: Some("https://s3-us-west-1.amazonaws.com/build.nearprotocol.com/nearcore-deploy/testnet/config.json".to_string()),
                 boot_nodes: None,
                 max_gas_burnt_view: None
             };
@@ -123,8 +125,6 @@ async fn listen_blocks(
     }
 }
 
-const EVENT_LOG_PREFIX: &str = "EVENT_JSON:";
-
 async fn extract_events(
     pool: &Database<PgConnection>,
     msg: near_indexer::StreamerMessage,
@@ -133,6 +133,8 @@ async fn extract_events(
     let block_hash = msg.block.header.hash.to_string();
     let block_timestamp = msg.block.header.timestamp_nanosec;
     let block_epoch_id = msg.block.header.epoch_id.to_string();
+
+    println!("BLOCK HEIGHT: {}", block_height);
 
     let mut events = vec![];
     for shard in msg.shards {
@@ -154,24 +156,25 @@ async fn extract_events(
                 ExecutionStatusView::SuccessReceiptId(_) => ExecutionOutcomeStatus::Success,
             };
             for (log_index, log) in logs.into_iter().enumerate() {
-                if log.starts_with(EVENT_LOG_PREFIX) {
-                    events.push(Event {
-                        block_height: block_height.into(),
-                        block_hash: block_hash.clone(),
-                        block_timestamp: block_timestamp.into(),
-                        block_epoch_id: block_epoch_id.clone(),
-                        receipt_id: receipt_id.clone(),
-                        log_index: log_index as i32,
-                        predecessor_id: predecessor_id.clone(),
-                        account_id: account_id.clone(),
-                        status,
-                        event: log.as_str()[EVENT_LOG_PREFIX.len()..].to_string(),
-                    })
-                }
+                events.push(Event {
+                    block_height: block_height.into(),
+                    block_hash: block_hash.clone(),
+                    block_timestamp: block_timestamp.into(),
+                    block_epoch_id: block_epoch_id.clone(),
+                    receipt_id: receipt_id.clone(),
+                    log_index: log_index as i32,
+                    predecessor_id: predecessor_id.clone(),
+                    account_id: account_id.clone(),
+                    status,
+                    event: log.as_str().to_string(),
+                })
+
+                // TODO: send all events to MQ
             }
         }
     }
 
+    // TODO: leaving it here for testing purposes, but we can remove this code since we'll forward all events to MQ, not storing to DB
     crate::await_retry_or_panic!(
         diesel::insert_into(schema::events::table)
             .values(events.clone())
