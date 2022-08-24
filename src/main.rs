@@ -1,40 +1,25 @@
 mod models;
-mod retriable;
-mod schema;
 
-#[macro_use]
-extern crate diesel;
-
-use actix_diesel::dsl::AsyncRunQueryDsl;
-use actix_diesel::Database;
-use diesel::PgConnection;
-use dotenv::dotenv;
+use nats::jetstream::JetStream;
 use near_indexer::near_primitives::views::{
     ExecutionOutcomeView, ExecutionStatusView, ReceiptView,
 };
-use std::env;
 use tracing_subscriber::EnvFilter;
 
-use crate::models::enums::ExecutionOutcomeStatus;
-use crate::models::events::Event;
+use crate::models::{Event, EventType, ExecutionOutcomeStatus};
 
-// TODO: remove all db related
-fn get_database_credentials() -> String {
-    dotenv().ok();
+fn establish_connection() -> JetStream {
+    let nats_url = if let Ok(nats_url) = std::env::var("NATS_URL") {
+        nats_url
+    } else {
+        "127.0.0.1:4222".to_string()
+    };
+    let nc = nats::connect(nats_url);
+    let js = nats::jetstream::new(nc.unwrap());
+    js.add_stream("events").unwrap();
 
-    env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env file")
+    return js;
 }
-
-fn establish_connection() -> actix_diesel::Database<PgConnection> {
-    let database_url = get_database_credentials();
-    actix_diesel::Database::builder()
-        .pool_max_size(30)
-        .open(&database_url)
-}
-
-const SCAM_PROJECT: &str = "scam_project";
-const INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
-const MAX_DELAY_TIME: std::time::Duration = std::time::Duration::from_secs(120);
 
 fn main() {
     openssl_probe::init_ssl_cert_env_vars();
@@ -47,7 +32,7 @@ fn main() {
     );
 
     env_filter = env_filter.add_directive(
-        "scam_project=info"
+        "events_indexer=info"
             .parse()
             .expect("Failed to parse directive"),
     );
@@ -76,37 +61,36 @@ fn main() {
         .map(|arg| arg.as_str())
         .expect("You need to provide a command: `init` or `run` as arg");
 
-    // TODO: add reading the config from ENV
     match command {
         "init" => {
             let config_args = near_indexer::InitConfigArgs {
-                chain_id: None,
+                chain_id: read_env("CHAIN_ID"),
                 account_id: None,
                 test_seed: None,
-                num_shards: 4,
+                num_shards: 4, // TODO make configurable
                 fast: false,
                 genesis: None,
                 download_genesis: false,
-                download_genesis_url: None,
+                download_genesis_url: read_env("DOWNLOAD_GENESIS_URL"),
                 download_config: false,
-                download_config_url: Some("https://s3-us-west-1.amazonaws.com/build.nearprotocol.com/nearcore-deploy/testnet/config.json".to_string()),
+                download_config_url: read_env("DOWNLOAD_CONFIG_URL"),
                 boot_nodes: None,
                 max_gas_burnt_view: None
             };
             near_indexer::indexer_init_configs(&home_dir, config_args).unwrap();
         }
         "run" => {
-            let pool = establish_connection();
+            let queue = establish_connection();
             let indexer_config = near_indexer::IndexerConfig {
                 home_dir: std::path::PathBuf::from(near_indexer::get_default_home()),
                 sync_mode: near_indexer::SyncModeEnum::FromInterruption,
-                await_for_node_synced: near_indexer::AwaitForNodeSyncedEnum::WaitForFullSync,
+                await_for_node_synced: near_indexer::AwaitForNodeSyncedEnum::StreamWhileSyncing,
             };
             let sys = actix::System::new();
             sys.block_on(async move {
                 let indexer = near_indexer::Indexer::new(indexer_config).unwrap();
                 let stream = indexer.streamer();
-                listen_blocks(stream, pool).await;
+                listen_blocks(stream, queue).await;
 
                 actix::System::current().stop();
             });
@@ -116,17 +100,27 @@ fn main() {
     }
 }
 
-async fn listen_blocks(
-    mut stream: tokio::sync::mpsc::Receiver<near_indexer::StreamerMessage>,
-    pool: Database<PgConnection>,
-) {
-    while let Some(streamer_message) = stream.recv().await {
-        extract_events(&pool, streamer_message).await.unwrap();
+fn read_env(key: &str) -> Option<String> {
+    if let Ok(value) = std::env::var(key) {
+        Some(value)
+    } else {
+        None
     }
 }
 
+async fn listen_blocks(
+    mut stream: tokio::sync::mpsc::Receiver<near_indexer::StreamerMessage>,
+    queue: JetStream,
+) {
+    while let Some(streamer_message) = stream.recv().await {
+        extract_events(&queue, streamer_message).await.unwrap();
+    }
+}
+const EVENT_LOG_PREFIX: &str = "EVENT_JSON:";
+const CALIMERO_EVENT_LOG_PREFIX: &str = "CALIMERO_EVENT:";
+
 async fn extract_events(
-    pool: &Database<PgConnection>,
+    queue: &JetStream,
     msg: near_indexer::StreamerMessage,
 ) -> anyhow::Result<()> {
     let block_height = msg.block.header.height;
@@ -134,9 +128,6 @@ async fn extract_events(
     let block_timestamp = msg.block.header.timestamp_nanosec;
     let block_epoch_id = msg.block.header.epoch_id.to_string();
 
-    println!("BLOCK HEIGHT: {}", block_height);
-
-    let mut events = vec![];
     for shard in msg.shards {
         for outcome in shard.receipt_execution_outcomes {
             let ReceiptView {
@@ -156,34 +147,34 @@ async fn extract_events(
                 ExecutionStatusView::SuccessReceiptId(_) => ExecutionOutcomeStatus::Success,
             };
             for (log_index, log) in logs.into_iter().enumerate() {
-                events.push(Event {
-                    block_height: block_height.into(),
-                    block_hash: block_hash.clone(),
-                    block_timestamp: block_timestamp.into(),
-                    block_epoch_id: block_epoch_id.clone(),
-                    receipt_id: receipt_id.clone(),
-                    log_index: log_index as i32,
-                    predecessor_id: predecessor_id.clone(),
-                    account_id: account_id.clone(),
-                    status,
-                    event: log.as_str().to_string(),
-                })
-
-                // TODO: send all events to MQ
+                if log.starts_with(EVENT_LOG_PREFIX) || log.starts_with(CALIMERO_EVENT_LOG_PREFIX) {
+                    let event_type = if log.starts_with(EVENT_LOG_PREFIX) {
+                        EventType::Near
+                    } else {
+                        EventType::Calimero
+                    };
+                    let subject = read_env("NATS_SUBJECT").unwrap_or("events".to_string());
+                    let event = Event {
+                        block_height: block_height.into(),
+                        block_hash: block_hash.clone(),
+                        block_timestamp: block_timestamp.into(),
+                        block_epoch_id: block_epoch_id.clone(),
+                        receipt_id: receipt_id.clone(),
+                        log_index: log_index as i32,
+                        predecessor_id: predecessor_id.clone(),
+                        account_id: account_id.clone(),
+                        status: status.clone(),
+                        event: log.as_str().to_string(),
+                        event_type,
+                    };
+                    // TODO handle Err
+                    queue
+                        .publish(&subject, serde_json::to_vec(&event).unwrap())
+                        .ok();
+                }
             }
         }
     }
-
-    // TODO: leaving it here for testing purposes, but we can remove this code since we'll forward all events to MQ, not storing to DB
-    crate::await_retry_or_panic!(
-        diesel::insert_into(schema::events::table)
-            .values(events.clone())
-            .on_conflict_do_nothing()
-            .execute_async(&pool),
-        10,
-        "Scam insert foilureee".to_string(),
-        &events
-    );
 
     Ok(())
 }
