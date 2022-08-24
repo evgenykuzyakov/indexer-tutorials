@@ -16,7 +16,12 @@ fn establish_connection() -> JetStream {
     };
     let nc = nats::connect(nats_url);
     let js = nats::jetstream::new(nc.unwrap());
-    js.add_stream("events").unwrap();
+    let stream = if let Ok(stream) = std::env::var("CHAIN_ID") {
+        stream
+    } else {
+        "testnet".to_string()
+    };
+    js.add_stream(&*format!("{}-events", stream)).unwrap();
 
     return js;
 }
@@ -75,7 +80,7 @@ fn main() {
                 download_config: false,
                 download_config_url: read_env("DOWNLOAD_CONFIG_URL"),
                 boot_nodes: None,
-                max_gas_burnt_view: None
+                max_gas_burnt_view: None,
             };
             near_indexer::indexer_init_configs(&home_dir, config_args).unwrap();
         }
