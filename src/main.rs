@@ -8,6 +8,15 @@ use tracing_subscriber::EnvFilter;
 
 use crate::models::{Event, EventType, ExecutionOutcomeStatus};
 
+fn get_subject() -> String {
+    let subject_prefix = if let Ok(chain_id) = std::env::var("CHAIN_ID") {
+        chain_id
+    } else {
+        "testnet".to_string()
+    };
+    format!("{}-events", subject_prefix)
+}
+
 fn establish_connection() -> JetStream {
     let nats_url = if let Ok(nats_url) = std::env::var("NATS_URL") {
         nats_url
@@ -16,12 +25,7 @@ fn establish_connection() -> JetStream {
     };
     let nc = nats::connect(nats_url);
     let js = nats::jetstream::new(nc.unwrap());
-    let stream = if let Ok(stream) = std::env::var("CHAIN_ID") {
-        stream
-    } else {
-        "testnet".to_string()
-    };
-    js.add_stream(&*format!("{}-events", stream)).unwrap();
+    js.add_stream(&*get_subject()).unwrap();
 
     return js;
 }
@@ -158,7 +162,6 @@ async fn extract_events(
                     } else {
                         EventType::Calimero
                     };
-                    let subject = read_env("NATS_SUBJECT").unwrap_or("events".to_string());
                     let event = Event {
                         block_height: block_height.into(),
                         block_hash: block_hash.clone(),
@@ -174,8 +177,8 @@ async fn extract_events(
                     };
                     // TODO handle Err
                     queue
-                        .publish(&subject, serde_json::to_vec(&event).unwrap())
-                        .ok();
+                        .publish(&*get_subject(), serde_json::to_vec(&event).unwrap())
+                        .unwrap();
                 }
             }
         }
