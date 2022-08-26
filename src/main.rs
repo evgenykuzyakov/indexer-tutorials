@@ -89,10 +89,15 @@ fn main() {
             near_indexer::indexer_init_configs(&home_dir, config_args).unwrap();
         }
         "run" => {
+            let sync_mode = if let Some(height_str) = read_env("START_HEIGHT") {
+                near_indexer::SyncModeEnum::BlockHeight(height_str.parse::<u64>().unwrap())
+            } else {
+                near_indexer::SyncModeEnum::FromInterruption
+            };
             let queue = establish_connection();
             let indexer_config = near_indexer::IndexerConfig {
                 home_dir: std::path::PathBuf::from(near_indexer::get_default_home()),
-                sync_mode: near_indexer::SyncModeEnum::FromInterruption,
+                sync_mode,
                 await_for_node_synced: near_indexer::AwaitForNodeSyncedEnum::StreamWhileSyncing,
             };
             let sys = actix::System::new();
@@ -126,7 +131,7 @@ async fn listen_blocks(
     }
 }
 const EVENT_LOG_PREFIX: &str = "EVENT_JSON:";
-const CALIMERO_EVENT_LOG_PREFIX: &str = "CALIMERO_EVENT:";
+const CALIMERO_EVENT_LOG_PREFIX: &str = "CALIMERO_EVENT_";
 
 async fn extract_events(
     queue: &JetStream,
