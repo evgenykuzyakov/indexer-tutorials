@@ -1,4 +1,4 @@
-FROM ubuntu:18.04 as builder
+FROM ubuntu:22.04 as builder
 RUN apt-get update -qq && apt-get install -y \
     git \
     cmake \

@@ -1,6 +1,6 @@
 [package]
 name = "events-indexer"
-version = "0.1.0"
+version = "1.29.0-rc.1"
 authors = ["Near Inc <hello@nearprotocol.com>"]
 edition = "2018"
 
@@ -21,4 +21,4 @@ serde_json = "1"
 
 nats = "0.23"
 
-near-indexer = { git = "https://github.com/near/nearcore", rev = "1.28.0" }
+near-indexer = { git = "https://github.com/near/nearcore", rev = "1.29.0-rc.1" }
