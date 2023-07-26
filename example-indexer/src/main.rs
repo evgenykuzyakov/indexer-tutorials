@@ -197,7 +197,7 @@ async fn extract_info(
                                     gas,
                                     deposit,
                                 } => {
-                                    if let Ok(args) = String::from_utf8(args) {
+                                    if let Ok(args) = String::from_utf8(args.to_vec()) {
                                         receipts.push(Receipt {
                                             block_height: block_height.into(),
                                             block_hash: block_hash.clone(),
