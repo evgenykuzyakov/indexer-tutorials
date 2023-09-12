@@ -1740,7 +1740,7 @@ dependencies = [
 
 [[package]]
 name = "example-indexer"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "actix",
  "actix-diesel",

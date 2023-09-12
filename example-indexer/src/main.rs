@@ -22,8 +22,6 @@ use crate::models::events::Event;
 use crate::models::social::Receipt;
 
 fn get_database_credentials() -> String {
-    dotenv().ok();
-
     env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env file")
 }
 
@@ -40,8 +38,13 @@ const MAX_DELAY_TIME: std::time::Duration = std::time::Duration::from_secs(120);
 
 fn main() {
     openssl_probe::init_ssl_cert_env_vars();
+    dotenv().ok();
 
     let whitelisted_accounts = HashSet::from(["social.near".to_string()]);
+    let stream_events: bool = env::var("STREAM_EVENTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(true);
 
     let args: Vec<String> = std::env::args().collect();
     let home_dir = std::path::PathBuf::from(near_indexer::get_default_home());
@@ -74,6 +77,13 @@ fn main() {
         .with_env_filter(env_filter)
         .with_writer(std::io::stderr)
         .init();
+
+    tracing::log::info!(
+        target: SCAM_PROJECT,
+        "Starting indexer. Whitelisted accounts: {:?}. Streaming events: {}",
+        whitelisted_accounts,
+        stream_events
+    );
 
     let command = args
         .get(1)
@@ -111,7 +121,7 @@ fn main() {
             sys.block_on(async move {
                 let indexer = near_indexer::Indexer::new(indexer_config).unwrap();
                 let stream = indexer.streamer();
-                listen_blocks(stream, pool, &whitelisted_accounts).await;
+                listen_blocks(stream, pool, &whitelisted_accounts, stream_events).await;
 
                 actix::System::current().stop();
             });
@@ -125,9 +135,10 @@ async fn listen_blocks(
     mut stream: tokio::sync::mpsc::Receiver<near_indexer::StreamerMessage>,
     pool: Database<PgConnection>,
     whitelisted_accounts: &HashSet<String>,
+    stream_events: bool,
 ) {
     while let Some(streamer_message) = stream.recv().await {
-        extract_info(&pool, streamer_message, whitelisted_accounts)
+        extract_info(&pool, streamer_message, whitelisted_accounts, stream_events)
             .await
             .unwrap();
     }
@@ -139,6 +150,7 @@ async fn extract_info(
     pool: &Database<PgConnection>,
     msg: near_indexer::StreamerMessage,
     whitelisted_accounts: &HashSet<String>,
+    stream_events: bool,
 ) -> anyhow::Result<()> {
     let block_height = msg.block.header.height;
     let block_hash = msg.block.header.hash.to_string();
@@ -165,20 +177,22 @@ async fn extract_info(
                 ExecutionStatusView::SuccessValue(_) => ExecutionOutcomeStatus::Success,
                 ExecutionStatusView::SuccessReceiptId(_) => ExecutionOutcomeStatus::Success,
             };
-            for (log_index, log) in logs.into_iter().enumerate() {
-                if log.starts_with(EVENT_LOG_PREFIX) {
-                    events.push(Event {
-                        block_height: block_height.into(),
-                        block_hash: block_hash.clone(),
-                        block_timestamp: block_timestamp.into(),
-                        block_epoch_id: block_epoch_id.clone(),
-                        receipt_id: receipt_id.clone(),
-                        log_index: log_index as i32,
-                        predecessor_id: predecessor_id.clone(),
-                        account_id: account_id.clone(),
-                        status,
-                        event: log.as_str()[EVENT_LOG_PREFIX.len()..].to_string(),
-                    })
+            if stream_events {
+                for (log_index, log) in logs.into_iter().enumerate() {
+                    if log.starts_with(EVENT_LOG_PREFIX) {
+                        events.push(Event {
+                            block_height: block_height.into(),
+                            block_hash: block_hash.clone(),
+                            block_timestamp: block_timestamp.into(),
+                            block_epoch_id: block_epoch_id.clone(),
+                            receipt_id: receipt_id.clone(),
+                            log_index: log_index as i32,
+                            predecessor_id: predecessor_id.clone(),
+                            account_id: account_id.clone(),
+                            status,
+                            event: log.as_str()[EVENT_LOG_PREFIX.len()..].to_string(),
+                        })
+                    }
                 }
             }
             if whitelisted_accounts.contains(&account_id) {
@@ -231,25 +245,29 @@ async fn extract_info(
         }
     }
 
-    crate::await_retry_or_panic!(
-        diesel::insert_into(schema::events::table)
-            .values(events.clone())
-            .on_conflict_do_nothing()
-            .execute_async(&pool),
-        10,
-        "Events insert foilureee".to_string(),
-        &events
-    );
+    if !events.is_empty() {
+        crate::await_retry_or_panic!(
+            diesel::insert_into(schema::events::table)
+                .values(events.clone())
+                .on_conflict_do_nothing()
+                .execute_async(&pool),
+            10,
+            "Events insert foilureee".to_string(),
+            &events
+        );
+    }
 
-    crate::await_retry_or_panic!(
-        diesel::insert_into(schema::receipts::table)
-            .values(receipts.clone())
-            .on_conflict_do_nothing()
-            .execute_async(&pool),
-        10,
-        "Receipts insert foilureee".to_string(),
-        &receipts
-    );
+    if !receipts.is_empty() {
+        crate::await_retry_or_panic!(
+            diesel::insert_into(schema::receipts::table)
+                .values(receipts.clone())
+                .on_conflict_do_nothing()
+                .execute_async(&pool),
+            10,
+            "Receipts insert foilureee".to_string(),
+            &receipts
+        );
+    }
 
     Ok(())
 }
