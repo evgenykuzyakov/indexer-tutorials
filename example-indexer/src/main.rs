@@ -351,5 +351,7 @@ async fn extract_info(
         );
     }
 
+    tracing::log::info!(target: PROJECT_ID, "Processed block {}", block_height);
+
     Ok(())
 }
