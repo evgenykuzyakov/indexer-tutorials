@@ -23,7 +23,7 @@ macro_rules! await_retry_or_panic {
                         })?
 
                         tracing::error!(
-                             target: crate::SCAM_PROJECT,
+                             target: crate::PROJECT_ID,
                              "Error occurred during {}: \n{:#?} \n{:#?} \n Retrying in {} milliseconds...",
                              async_error,
                              &$error_message,

@@ -4,7 +4,7 @@ use bigdecimal::BigDecimal;
 use crate::schema;
 use schema::receipts;
 
-#[derive(Insertable, Clone, Debug)]
+#[derive(Insertable, Clone, Debug, Queryable)]
 pub struct Receipt {
     pub block_height: BigDecimal,
     pub block_hash: String,

@@ -1,4 +1,5 @@
 mod models;
+mod redis_db;
 mod retriable;
 mod schema;
 
@@ -7,19 +8,24 @@ extern crate diesel;
 
 use actix_diesel::dsl::AsyncRunQueryDsl;
 use actix_diesel::Database;
-use diesel::PgConnection;
+use bigdecimal::ToPrimitive;
+use diesel::{ExpressionMethods, PgConnection, QueryDsl};
 use dotenv::dotenv;
+use near_indexer::near_primitives::types::BlockHeight;
 use near_indexer::near_primitives::views::{
     ActionView, ExecutionOutcomeView, ExecutionStatusView, ReceiptEnumView, ReceiptView,
 };
+use near_indexer::StreamerMessage;
 use std::collections::HashSet;
 use std::env;
 use std::str::FromStr;
+use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
 use crate::models::enums::ExecutionOutcomeStatus;
 use crate::models::events::Event;
 use crate::models::social::Receipt;
+use crate::redis_db::RedisDB;
 
 fn get_database_credentials() -> String {
     env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env file")
@@ -32,9 +38,13 @@ fn establish_connection() -> actix_diesel::Database<PgConnection> {
         .open(&database_url)
 }
 
-const SCAM_PROJECT: &str = "scam_project";
+const PROJECT_ID: &str = "social_indexer";
 const INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 const MAX_DELAY_TIME: std::time::Duration = std::time::Duration::from_secs(120);
+
+const FINAL_BLOCKS_KEY: &str = "final_blocks";
+const BLOCK_KEY: &str = "block";
+const SAFE_OFFSET: u64 = 100;
 
 fn main() {
     openssl_probe::init_ssl_cert_env_vars();
@@ -50,11 +60,11 @@ fn main() {
     let home_dir = std::path::PathBuf::from(near_indexer::get_default_home());
 
     let mut env_filter = EnvFilter::new(
-        "tokio_reactor=info,near=info,stats=info,telemetry=info,indexer=info,aggregated=info",
+        "redis=info,tokio_reactor=info,near=info,stats=info,telemetry=info,indexer=info,aggregated=info",
     );
 
     env_filter = env_filter.add_directive(
-        "scam_project=info"
+        "social_indexer=info"
             .parse()
             .expect("Failed to parse directive"),
     );
@@ -79,7 +89,7 @@ fn main() {
         .init();
 
     tracing::log::info!(
-        target: SCAM_PROJECT,
+        target: PROJECT_ID,
         "Starting indexer. Whitelisted accounts: {:?}. Streaming events: {}",
         whitelisted_accounts,
         stream_events
@@ -105,9 +115,52 @@ fn main() {
                 download_config: false,
                 download_config_url: Some("https://s3-us-west-1.amazonaws.com/build.nearprotocol.com/nearcore-deploy/mainnet/config.json".to_string()),
                 boot_nodes: None,
-                max_gas_burnt_view: None
+                max_gas_burnt_view: None,
             };
             near_indexer::indexer_init_configs(&home_dir, config_args).unwrap();
+        }
+        "redis_run" => {
+            let pool = establish_connection();
+
+            let sys = actix::System::new();
+            sys.block_on(async move {
+                let mut read_redis_db = RedisDB::new(None).await;
+                let (id, _key_values) = read_redis_db
+                    .xread(1, FINAL_BLOCKS_KEY, "0")
+                    .await
+                    .expect("Failed to get the first block from Redis")
+                    .into_iter()
+                    .next()
+                    .unwrap();
+                let first_block_height: BlockHeight =
+                    id.split_once("-").unwrap().0.parse().unwrap();
+                tracing::log::info!(target: PROJECT_ID, "First redis block {}", first_block_height);
+
+                // Select 1 Receipt from the database ordered by block_height descending using Diesel 1.4.8
+                let receipt: Receipt = schema::receipts::table
+                    .order(schema::receipts::block_height.desc())
+                    .first_async(&pool)
+                    .await
+                    .expect("Failed to get the last indexed block");
+
+                let last_block_height: BlockHeight = receipt.block_height.to_u64().unwrap();
+
+                if first_block_height + SAFE_OFFSET > last_block_height {
+                    panic!("The first block in the redis is too close to the last indexed block");
+                }
+
+                let last_id = format!("{}-0", last_block_height);
+                tracing::log::info!(target: PROJECT_ID, "Resuming from {}", last_block_height);
+
+                actix::System::current().stop();
+                return;
+
+                let stream = streamer(last_id, read_redis_db);
+                listen_blocks(stream, pool, &whitelisted_accounts, stream_events).await;
+
+                actix::System::current().stop();
+            });
+            sys.run().unwrap();
         }
         "run" => {
             let pool = establish_connection();
@@ -129,6 +182,38 @@ fn main() {
         }
         _ => panic!("You have to pass `init` or `run` arg"),
     }
+}
+
+async fn start(
+    mut last_id: String,
+    mut redis_db: RedisDB,
+    blocks_sink: mpsc::Sender<StreamerMessage>,
+) {
+    loop {
+        let res = redis_db.xread(1, FINAL_BLOCKS_KEY, &last_id).await;
+        let res = match res {
+            Ok(res) => res,
+            Err(err) => {
+                tracing::log::error!(target: PROJECT_ID, "Error: {}", err);
+                tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                let _ = redis_db.reconnect().await;
+                continue;
+            }
+        };
+        let (id, key_values) = res.into_iter().next().unwrap();
+        assert_eq!(key_values.len(), 1, "Expected 1 key-value pair");
+        let (key, value) = key_values.into_iter().next().unwrap();
+        assert_eq!(key, BLOCK_KEY, "Expected key to be block");
+        let streamer_message: StreamerMessage = serde_json::from_str(&value).unwrap();
+        blocks_sink.send(streamer_message).await.unwrap();
+        last_id = id;
+    }
+}
+
+pub fn streamer(last_id: String, redis_db: RedisDB) -> mpsc::Receiver<StreamerMessage> {
+    let (sender, receiver) = mpsc::channel(100);
+    tokio::spawn(start(last_id, redis_db, sender));
+    receiver
 }
 
 async fn listen_blocks(
@@ -228,7 +313,7 @@ async fn extract_info(
                                             deposit: bigdecimal::BigDecimal::from_str(
                                                 deposit.to_string().as_str(),
                                             )
-                                            .unwrap(),
+                                                .unwrap(),
                                             gas: gas.into(),
                                             method_name,
                                             args,
