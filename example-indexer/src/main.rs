@@ -98,7 +98,7 @@ fn main() {
     let command = args
         .get(1)
         .map(|arg| arg.as_str())
-        .expect("You need to provide a command: `init` or `run` as arg");
+        .expect("You need to provide a command: `init`, `run` or `redis_run` as arg");
 
     match command {
         "init" => {
@@ -152,9 +152,6 @@ fn main() {
                 let last_id = format!("{}-0", last_block_height);
                 tracing::log::info!(target: PROJECT_ID, "Resuming from {}", last_block_height);
 
-                actix::System::current().stop();
-                return;
-
                 let stream = streamer(last_id, read_redis_db);
                 listen_blocks(stream, pool, &whitelisted_accounts, stream_events).await;
 
@@ -180,7 +177,7 @@ fn main() {
             });
             sys.run().unwrap();
         }
-        _ => panic!("You have to pass `init` or `run` arg"),
+        _ => panic!("You have to pass `init`, `run` or `redis_run` arg"),
     }
 }
 
