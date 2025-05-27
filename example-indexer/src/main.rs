@@ -10,17 +10,19 @@ use actix_diesel::Database;
 use bigdecimal::ToPrimitive;
 use diesel::{ExpressionMethods, PgConnection, QueryDsl};
 use dotenv::dotenv;
+use fastnear_neardata_fetcher::fetcher;
+use fastnear_primitives::block_with_tx_hash::BlockWithTxHashes;
+use fastnear_primitives::near_primitives::types::BlockHeight;
+use fastnear_primitives::near_primitives::views::{
+    ActionView, ExecutionOutcomeView, ExecutionStatusView, ReceiptEnumView, ReceiptView,
+};
+use fastnear_primitives::types::ChainId;
 use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::env;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use fastnear_neardata_fetcher::fetcher;
-use fastnear_primitives::block_with_tx_hash::BlockWithTxHashes;
-use fastnear_primitives::near_primitives::types::BlockHeight;
-use fastnear_primitives::near_primitives::views::{ActionView, ExecutionOutcomeView, ExecutionStatusView, ReceiptEnumView, ReceiptView};
-use fastnear_primitives::types::ChainId;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
@@ -54,7 +56,7 @@ fn main() {
         ctrl_c_running.store(false, Ordering::SeqCst);
         println!("Received Ctrl+C, starting shutdown...");
     })
-        .expect("Error setting Ctrl+C handler");
+    .expect("Error setting Ctrl+C handler");
 
     let whitelisted_accounts = HashSet::from(["social.near".to_string()]);
     let stream_events: bool = env::var("STREAM_EVENTS")
@@ -64,9 +66,8 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
 
-    let mut env_filter = EnvFilter::new(
-        "tokio_reactor=info,neardata-fetcher=info,social_indexer=info",
-    );
+    let mut env_filter =
+        EnvFilter::new("tokio_reactor=info,neardata-fetcher=info,social_indexer=info");
 
     if let Ok(rust_log) = std::env::var("RUST_LOG") {
         if !rust_log.is_empty() {
@@ -106,8 +107,9 @@ fn main() {
             let sys = actix::System::new();
             sys.block_on(async move {
                 let client = reqwest::Client::new();
-                let chain_id = ChainId::try_from(std::env::var("CHAIN_ID").expect("CHAIN_ID is not set"))
-                    .expect("Invalid chain id");
+                let chain_id =
+                    ChainId::try_from(std::env::var("CHAIN_ID").expect("CHAIN_ID is not set"))
+                        .expect("Invalid chain id");
                 let first_block_height = fetcher::fetch_first_block(&client, chain_id)
                     .await
                     .expect("First block doesn't exists")
@@ -132,17 +134,12 @@ fn main() {
                     .unwrap_or(4);
 
                 let (sender, receiver) = mpsc::channel(100);
-                let config = fetcher::FetcherConfig {
-                    num_threads,
-                    start_block_height: last_block_height + 1,
-                    chain_id,
-                };
-                tokio::spawn(fetcher::start_fetcher(
-                    Some(client),
-                    config,
-                    sender,
-                    is_running,
-                ));
+                let config = fetcher::FetcherConfigBuilder::new()
+                    .num_threads(num_threads)
+                    .start_block_height(last_block_height + 1)
+                    .chain_id(chain_id)
+                    .build();
+                tokio::spawn(fetcher::start_fetcher(config, sender, is_running));
 
                 listen_blocks(receiver, pool, &whitelisted_accounts, stream_events).await;
 
@@ -189,6 +186,7 @@ async fn extract_info(
                 receiver_id: account_id,
                 receipt_id,
                 receipt,
+                priority: _,
             } = outcome.receipt;
             let predecessor_id = predecessor_id.to_string();
             let account_id = account_id.to_string();
@@ -251,7 +249,7 @@ async fn extract_info(
                                             deposit: bigdecimal::BigDecimal::from_str(
                                                 deposit.to_string().as_str(),
                                             )
-                                                .unwrap(),
+                                            .unwrap(),
                                             gas: gas.into(),
                                             method_name,
                                             args,
@@ -263,6 +261,7 @@ async fn extract_info(
                         }
                     }
                     ReceiptEnumView::Data { .. } => {}
+                    ReceiptEnumView::GlobalContractDistribution { .. } => {}
                 }
             }
         }

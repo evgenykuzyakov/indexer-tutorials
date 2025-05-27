@@ -856,7 +856,6 @@ checksum = "4a3daa8e81a3963a60642bcc1f90a670680bd4a77535faa384e9d1c79d620871"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
- "rand_core",
  "sha2",
  "subtle",
 ]
@@ -930,7 +929,6 @@ dependencies = [
  "fastnear-neardata-fetcher",
  "fastnear-primitives",
  "itertools",
- "near-crypto",
  "openssl-probe",
  "reqwest",
  "serde",
@@ -1807,7 +1805,6 @@ dependencies = [
  "near-schema-checker-lib",
  "near-stdx",
  "primitive-types",
- "rand",
  "secp256k1",
  "serde",
  "serde_json",
@@ -2574,7 +2571,6 @@ version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25996b82292a7a57ed3508f052cfff8640d38d32018784acd714758b43da9c8f"
 dependencies = [
- "rand",
  "secp256k1-sys",
 ]
 
