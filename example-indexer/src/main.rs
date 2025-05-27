@@ -58,6 +58,7 @@ fn main() {
     })
     .expect("Error setting Ctrl+C handler");
 
+    let auth_bearer_token = std::env::var("AUTH_BEARER_TOKEN").ok();
     let whitelisted_accounts = HashSet::from(["social.near".to_string()]);
     let stream_events: bool = env::var("STREAM_EVENTS")
         .ok()
@@ -134,12 +135,14 @@ fn main() {
                     .unwrap_or(4);
 
                 let (sender, receiver) = mpsc::channel(100);
-                let config = fetcher::FetcherConfigBuilder::new()
+                let mut config = fetcher::FetcherConfigBuilder::new()
                     .num_threads(num_threads)
                     .start_block_height(last_block_height + 1)
-                    .chain_id(chain_id)
-                    .build();
-                tokio::spawn(fetcher::start_fetcher(config, sender, is_running));
+                    .chain_id(chain_id);
+                if let Some(auth_bearer_token) = auth_bearer_token {
+                    config = config.auth_bearer_token(auth_bearer_token);
+                }
+                tokio::spawn(fetcher::start_fetcher(config.build(), sender, is_running));
 
                 listen_blocks(receiver, pool, &whitelisted_accounts, stream_events).await;
 
