@@ -253,7 +253,10 @@ async fn extract_info(
                                                 deposit.to_string().as_str(),
                                             )
                                             .unwrap(),
-                                            gas: gas.into(),
+                                            gas: bigdecimal::BigDecimal::from_str(
+                                                gas.to_string().as_str(),
+                                            )
+                                            .unwrap(),
                                             method_name,
                                             args,
                                         });
