@@ -250,11 +250,11 @@ async fn extract_info(
                                             account_id: account_id.clone(),
                                             status,
                                             deposit: bigdecimal::BigDecimal::from_str(
-                                                deposit.to_string().as_str(),
+                                                deposit.as_yoctonear().to_string().as_str(),
                                             )
                                             .unwrap(),
                                             gas: bigdecimal::BigDecimal::from_str(
-                                                gas.to_string().as_str(),
+                                                gas.as_gas().to_string().as_str(),
                                             )
                                             .unwrap(),
                                             method_name,
