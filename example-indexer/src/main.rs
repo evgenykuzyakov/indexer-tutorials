@@ -189,7 +189,7 @@ async fn extract_info(
                 receiver_id: account_id,
                 receipt_id,
                 receipt,
-                priority: _,
+                _priority: _,
             } = outcome.receipt;
             let predecessor_id = predecessor_id.to_string();
             let account_id = account_id.to_string();
